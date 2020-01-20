@@ -1,4 +1,0 @@
-LAB 7
-NAME: Mitch Adams, Joan Barros de Magalhaes
-
-We spent 4 hours. The lab was very straight forward, but since we copied some code from semaphore/queue similar functions, some parts of those functions weren't entirely transferrable so we did not fully account for specific bugs that could come up in the Event Lab. Two main bugs that we had: We were assigning the running task in Pend after we incremented the index of the array of waiting tasks. The other bug was very odd. We had to uncomment a print Statement in New Task because, when running with Tick=750, the program would crash.
