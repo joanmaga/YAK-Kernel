@@ -1,0 +1,389 @@
+#include "yakk.h"
+#include "yaku.h"
+#include "clib.h"
+
+#define FIRST_DISPATCH 0
+#define ISR_DISPATCH 1
+#define BLOCK_DISPATCH 2
+
+TCB tcb_array[MAX_NUMBER_OF_TASKS + 1];
+int next_available_tcb = 0;
+YKSEM sem_array[MAX_NUMBER_OF_SEMAPHORES];
+int next_available_semaphore = 0;
+
+int debug = 1;
+
+TCBptr YKList;
+TCBptr running_task;
+TCBptr old_task;
+int YK_running = 0;
+int YKCtxSwCount;
+int YKIdleCount;
+int YKTickNum;
+int YK_Depth;
+int FirstTime;
+int IdleTskStk[IDLE_TASK_SIZE];
+
+void disable_interrupts();
+void enable_interrupts();
+void save_context();
+void restore_context();
+
+void YKInitialize(void)
+{
+	YKNewTask(YKIdleTask, (void *)&IdleTskStk[IDLE_TASK_SIZE], IDLE_TASK_PRIORITY);
+	YKCtxSwCount = 0;
+	YKIdleCount = 0;
+	YKTickNum = 0;
+	YK_Depth = 0;
+	FirstTime = 1;
+}
+
+void YKEnterMutex(void) {
+	disable_interrupts();
+}
+
+void YKExitMutex(void) {
+	enable_interrupts();
+}
+
+void YKIdleTask(void)
+{
+	while (1)
+	{
+		++YKIdleCount;
+		--YKIdleCount;
+		++YKIdleCount;
+		//read disassemble and ensure there are at least four instruction here
+	}
+}
+
+void YKNewTask(void(*task)(void), void *taskStack, unsigned char priority)
+{
+	int index;
+	TCBptr tempHead;
+	YKEnterMutex();
+	index = next_available_tcb;
+	tempHead = YKList;
+	tcb_array[index].delay_counter = 0;
+	tcb_array[index].id = next_available_tcb;
+	tcb_array[index].priority = priority;
+	tcb_array[index].task = (void*)task;
+	tcb_array[index].pInst = (void*)(task);
+	tcb_array[index].pStck = (int*)(taskStack);
+	tcb_array[index].state = READY;
+	tcb_array[index].firstTime = 1;
+	tcb_array[index].next_sem = NULL;
+	tcb_array[index].prev_sem = NULL;
+	next_available_tcb++;
+
+	if (index == 0) YKList = &(tcb_array[index]);
+
+	while (tempHead != NULL) {
+		if (priority < tempHead->priority) {	//LOCATION FOR NEW TASK IS FOUND
+
+			if (YKList == tempHead) {		//SPECIAL CASE TO MODIFY HEAD
+				YKList->prev = &(tcb_array[index]);
+				tcb_array[index].next = YKList;
+				YKList = &(tcb_array[index]);
+			}
+			else {
+				tcb_array[index].next = tempHead;
+				tcb_array[index].prev = tempHead->prev;
+				tempHead->prev->next = &(tcb_array[index]);
+				tempHead->prev = &(tcb_array[index]);
+			}
+			tempHead = NULL;
+			//break;
+		}
+		else {
+			tempHead = tempHead->next;
+		}
+	}
+	YKExitMutex();
+	if (YK_running) {
+														if (debug) printString("**NEW TASK scheduler\n");
+		YKScheduler(BLOCK_DISPATCH);
+	}
+
+	//MAYBE:EXIT MUTEX
+}
+
+void YKRun(void)
+{
+	if (YKList != &(tcb_array[0])) { //If idle task is not at the head of list (ie there are user-defined tasks)
+		YK_running = 1;
+														if (debug) printString("**NEW scheduler\n");
+		YKScheduler(FIRST_DISPATCH);
+	}
+}
+
+void YKScheduler(int dispatcher_type)        //Determines the highest priority ready taskvoid YKScheduler(void)
+{
+	TCBptr currentTCB;
+	YKEnterMutex();
+	currentTCB = YKList;
+	while (currentTCB != NULL) {
+		if (currentTCB->state == RUNNING) {
+														if (debug) {															
+															printString("**current tcb with id ");
+															printInt(currentTCB->id);
+															printString(" is running\n");
+														}			
+			break;
+		}
+		else if (currentTCB->state == READY) {
+														if (debug) {	
+															printString("**running dispatcher on the first ready tcb with id: ");
+															printInt(currentTCB->id);
+															printString("\n");
+														}
+			YKDispatcher(currentTCB, dispatcher_type);
+			break;
+		}
+														if (debug) {
+															printString("**current tcb with id ");
+															printInt(currentTCB->id);
+															printString(" is blocked, moving on\n");
+														}
+		currentTCB = currentTCB->next;
+	}
+	YKExitMutex();
+}
+
+extern void YKDispHandler();
+extern void YKFirst();
+extern void YKISR();
+extern void YKSecond();
+
+void YKDispatcher(TCBptr task, int dispatcher_type)
+{
+	int bool_return = 0;
+	int firstForTask = task->firstTime;
+	int isFirst = FirstTime;
+
+	old_task = running_task;
+
+	if(FirstTime) {		//FIRST TIME
+		task->firstTime = 0;
+		FirstTime = 0;
+		++YKCtxSwCount;
+		running_task = task;
+		//bool_return = 2;save_context
+	}
+	else if (running_task->state == BLOCKED) {
+		running_task = task;	//SETS NEW RUNNING TASK
+		if (!(task->firstTime)) {
+			task->firstTime = 0;
+			//++YKCtxSwCount;
+			//bool_return = 2;
+			//bool_return = 1;
+		}
+		else {
+			task->firstTime = 0;
+			task->state = RUNNING;
+			++YKCtxSwCount;
+			//bool_return = 3;
+		}
+	}
+	else {	
+		task->firstTime = 0;
+		++YKCtxSwCount;
+		old_task->state = READY;
+		task->state = RUNNING;
+		running_task = task;
+		//bool_return = 3;
+	}
+
+	//if (enable) enable_interrupts();
+	if (isFirst || dispatcher_type == FIRST_DISPATCH) {
+														if (debug) {
+															printString("**running FIRST dispatcher for task id ");
+															printInt(task->id);
+															printString("\n");	
+														}
+		YKFirst();
+	}
+	else if (dispatcher_type == BLOCK_DISPATCH) {
+		if(firstForTask){
+														if (debug) {
+															printString("**running first task dispatcher for task id ");
+															printInt(task->id);
+															printString("\n");
+														}	
+			YKSecond();
+		}
+		else {
+														if (debug) {
+															printString("**running normal dispatcher for task id ");
+															printInt(task->id);
+															printString("\n");
+														}
+			YKDispHandler(); 
+		}
+	}
+	else {
+														if (debug) {
+															printString("**running ISR dispatcher for task id ");
+															printInt(task->id);
+															printString("\n");
+														}
+		YKISR();
+	}
+
+	
+	
+}
+
+void YKDelayTask(unsigned count)
+{
+	//MAYBE: SAVE CONTEXT
+	if (count == 0) return;
+	YKEnterMutex();
+	running_task->delay_counter = count;
+																		if (debug) {
+																			printString("**Delay is blocking task with id ");
+																			printInt(running_task->id);
+																			printString("\n");
+																		}
+	running_task->state = BLOCKED;			//BLOCKS DELAYED TASK
+	YKExitMutex();
+	//MAYBE: SAVE CONTEXT										//PRINT STRING HERE
+	YKScheduler(BLOCK_DISPATCH);
+	//MAYBE: RESTORE CONTEXT
+	//CALLS SPECIAL SCHEDULER AND SAVES CONTEXT
+	//MAYBE: RESTORE CONTEXT AND GO BACK TO FUNCTION
+}
+
+void YKEnterISR()
+{
+	++YK_Depth;
+}
+
+void YKExitISR()
+{
+	--YK_Depth;
+	if (YK_Depth == 0){ 
+		YKScheduler(ISR_DISPATCH);
+	}
+}
+
+//CALLED BY TICK ISR
+//May also call a user tick handler if the user code requires actions to be taken on each clock tick
+void YKTickHandler()
+{
+	TCBptr currentTCB = YKList;
+	YKEnterMutex();
+	++YKTickNum;
+	while (currentTCB != NULL) {
+		//printString("bloop\n");
+		if (currentTCB->task == YKIdleTask) break;	//MIGHT NEED TO CHANGE THIS IN THE FUTURE. 
+		//printString("bleep\n");											//BUT IDLE TASK SHOULDN'T HAVE A DELAY RIGHT NOW
+		if (currentTCB->delay_counter != 0) {
+			--(currentTCB->delay_counter);
+																		if (debug) {
+																			printString("**decrementing delay counter of tcb ");
+																			printInt(currentTCB->id);
+																			printString(" to ");
+																			printInt(currentTCB->delay_counter);
+																			printString("\n");
+																		}
+			if (currentTCB->delay_counter == 0) {
+																		if (debug) printString("**setting that tcb to ready\n");
+				currentTCB->state = READY;
+			}
+		}
+		currentTCB = currentTCB->next;
+	}
+	YKExitMutex();
+
+	/*TCBptr currentTCB;
+	YKEnterMutex();
+	currentTCB = YKList;
+	++YKTickNum;
+	while (currentTCB != NULL) {
+		if (currentTCB->task == YKIdleTask) {
+			YKList = &(tcb_array[1]);			
+			//signalEOI();
+			YKExitMutex();
+			//YKExitISR();
+			return;	//MIGHT NEED TO CHANGE THIS IN THE FUTURE. 
+		}													//BUT IDLE TASK SHOULDN'T HAVE A DELAY RIGHT NOW
+		if (currentTCB->delay_counter != 0) {
+			--(currentTCB->delay_counter);
+			if (currentTCB->delay_counter == 0) {
+				currentTCB->state = READY;
+				//printString("Set to ready\n");
+			}
+		}
+		currentTCB = currentTCB->next;
+	}
+	YKList = &(tcb_array[1]);
+	//signalEOI();
+	YKExitMutex();
+	//YKExitISR();*/
+}
+
+YKSEM* YKSemCreate(int initialValue) {
+    YKSEM* sem_ptr = &sem_array[next_available_semaphore];
+	next_available_semaphore++;
+	sem_ptr->value = initialValue;
+	sem_ptr->waiting_task_list = NULL;
+	return sem_ptr;
+}
+
+void YKSemPend(YKSEM *semaphore) {
+	TCBptr current_tcb;     
+	YKEnterMutex();
+																		if (debug) printString("\n**Entering sem pend\n");
+	(semaphore->value)--;
+    if (semaphore->value >= 0) {
+    	return;
+    }
+    else {
+																		if (debug) {
+																			printString("**Semaphore is taken. Blocking running task with id: ");
+																			printInt(running_task->id);
+																			printString("\n");
+																		}
+    	running_task->state = BLOCKED;
+		current_tcb = semaphore->waiting_task_list;
+		while(1) {
+			if (current_tcb->next_sem == NULL) {
+				running_task->prev_sem = current_tcb;
+				current_tcb->next_sem = running_task;
+				break;			
+			}
+			else if (current_tcb->next_sem->priority > running_task->priority) {
+				current_tcb->next_sem->prev_sem = running_task;
+				running_task->next_sem = current_tcb->next_sem->prev_sem;				
+				current_tcb->next_sem = running_task;
+				running_task->prev_sem = current_tcb;			
+				break;			
+			}
+			current_tcb = current_tcb->next_sem;
+		}
+		
+		YKScheduler(BLOCK_DISPATCH);
+    }
+}
+
+void YKSemPost(YKSEM *semaphore) {
+																		if (debug) printString("\n**Entering sem post\n");
+	(semaphore->value)++;
+	if (semaphore->waiting_task_list->next_sem != NULL) { //If anything is waiting on this semaphore
+																		if (debug) {
+																			printString("**Semaphore post is setting tcb ");
+																			printInt(semaphore->waiting_task_list->next_sem->id);
+																			printString(" to ready\n");
+																		}
+		semaphore->waiting_task_list->next_sem->state = READY;
+		semaphore->waiting_task_list->next_sem->next_sem->prev_sem = semaphore->waiting_task_list;
+		semaphore->waiting_task_list->next_sem->next_sem = NULL;
+		semaphore->waiting_task_list->next_sem->prev_sem = NULL;
+		semaphore->waiting_task_list->next_sem = semaphore->waiting_task_list->next_sem->next_sem;
+	}
+    if (YK_Depth == 0) { //If called from task code
+		YKScheduler(BLOCK_DISPATCH);
+    }
+}

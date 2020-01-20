@@ -1,0 +1,27 @@
+YKSEM* YKSemCreate(int initialValue) {
+       //Create and initialize a semaphore with the initialValue
+       //YKSEM is a struct with 
+       	      //value
+	      //head of an ordered linked list (or an array) that contains the tasks that are waiting on this semaphore
+       //Return that semaphore
+}
+
+void YKSemPend(YKSEM *semaphore) {
+     int sem_value = semaphore->value;
+     (*semaphore)--;
+     if (sem_value > 0) {
+     	return;
+     }
+     else {
+     	  //block this task
+	  //call the scheduler
+     }
+}
+
+void YKSemPost(YKSEM *semaphore) {
+     (*semaphore)++;
+     //if suscpended tasks are waiting for this semaphore, the waiting task with the highest priority is made ready
+     if (depth counter == 0) { //If called from task code
+     	//call scheduler
+     }
+}
